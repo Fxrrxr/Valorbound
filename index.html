@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Valorbound — Mini RPG</title>
+<meta name="description" content="Valorbound: single-file top-down RPG demo. Move, fight, level up, collect items, save progress." />
+<style>
+  :root{--bg:#0b1220;--fg:#e8f2ff;--accent:#7cccf0}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Arial;background:linear-gradient(180deg,#071226,#08121b);color:var(--fg)}
+  .wrap{max-width:1080px;margin:20px auto;padding:18px}
+  header{display:flex;align-items:center;justify-content:space-between}
+  h1{margin:0;font-size:20px}
+  .toolbar{display:flex;gap:8px}
+  button{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 10px;border-radius:8px;color:var(--fg);cursor:pointer}
+  button.primary{background:linear-gradient(90deg,var(--accent),#a87bff);color:#02121a;border:0}
+  canvas{display:block;width:100%;height:66vh;border-radius:12px;margin-top:14px;background:#06101a}
+  .hud{display:flex;gap:12px;margin-top:12px;align-items:center}
+  .muted{color:rgba(232,242,255,0.7)}
+  .center{display:flex;align-items:center;justify-content:center}
+  pre{white-space:pre-wrap}
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <div>
+        <h1>Valorbound</h1>
+        <div class="muted">Top-down mini RPG — explore, fight, collect, and save.</div>
+      </div>
+      <div class="toolbar">
+        <button id="newBtn" class="primary">New Game</button>
+        <button id="saveBtn">Save</button>
+        <button id="loadBtn">Load</button>
+        <button id="helpBtn">Help</button>
+      </div>
+    </header>
+
+    <canvas id="c" width="1280" height="720" aria-label="Valorbound game canvas"></canvas>
+
+    <div class="hud">
+      <div class="muted">HP: <strong id="hp">0</strong></div>
+      <div class="muted">XP: <strong id="xp">0</strong></div>
+      <div class="muted">Gold: <strong id="gold">0</strong></div>
+      <div class="muted">Level: <strong id="lvl">0</strong></div>
+      <div style="margin-left:auto" class="muted">High Score: <strong id="hi">0</strong></div>
+    </div>
+
+    <div id="log" class="muted center" style="margin-top:10px;min-height:26px"></div>
+
+    <footer class="muted center" style="margin-top:12px">Use arrow keys / WASD to move. X to interact/attack. Save/load uses localStorage.</footer>
+  </main>
+
+<script>
+/* Valorbound — compact single-file RPG
+   Features:
+   - Tile map with collision
+   - Player movement, facing, attack
+   - Enemies with simple AI
+   - Inventory (potion), level & XP, gold
+   - Save/Load via localStorage
+   - Minimal graphics drawn on canvas (no external assets)
+
+   NOTE: This is a demo engine — extend with quests, maps, sprites.
+*/
+
+// ---- Config ----
+const TILE = 48; // px
+const VIEW_TILES_X = 20;
+const VIEW_TILES_Y = 12;
+const PLAYER_SPEED = 160; // px/sec
+const CANVAS = document.getElementById('c');
+const ctx = CANVAS.getContext('2d');
+let W = CANVAS.width, H = CANVAS.height;
+
+// ---- simple map: 0=ground,1=wall,2=grass (walkable slow),3=chest ----
+const MAP_W = 40, MAP_H = 30;
+let map = [];
+function generateMap(){
+  map = new Array(MAP_H).fill(0).map(()=>new Array(MAP_W).fill(0));
+  // border walls
+  for(let y=0;y<MAP_H;y++){
+    for(let x=0;x<MAP_W;x++){
+      if(x===0||y===0||x===MAP_W-1||y===MAP_H-1) map[y][x]=1;
+      else if(Math.random()<0.06) map[y][x]=1;
+      else if(Math.random()<0.03) map[y][x]=3; // chest
+      else if(Math.random()<0.08) map[y][x]=2;
+    }
+  }
+  // ensure start area clear
+  for(let y=2;y<6;y++) for(let x=2;x<6;x++) map[y][x]=0;
+}
+
+// ---- Entities ----
+let player = null;
+let enemies = [];
+let messages = [];
+let highGold = 0;
+
+function newGame(){
+  generateMap();
+  player = {x: TILE*4 + TILE/2, y: TILE*4 + TILE/2, vx:0, vy:0, hp:20, maxHp:20, xp:0, lvl:1, gold:0, facing: 'down', inv:{potion:1}};
+  enemies = [];
+  spawnEnemies(12);
+  log('Welcome, adventurer!');
+  updateHUD();
+}
+
+function spawnEnemies(n){
+  enemies = [];
+  for(let i=0;i<n;i++){
+    let ex,ey;
+    do{ ex = Math.floor(Math.random()*(MAP_W-6))+6; ey = Math.floor(Math.random()*(MAP_H-6))+6; } while(!isWalkable(ex,ey));
+    enemies.push({x:ex*TILE + TILE/2, y:ey*TILE + TILE/2, hp: 6 + Math.floor(Math.random()*6), atk:2 + Math.floor(Math.random()*3), speed: 40 + Math.random()*40, roam:0});
+  }
+}
+
+// ---- helpers ----
+function isWalkable(tx,ty){ if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return false; return map[ty][tx]!==1; }
+function tileAt(px,py){ return map[Math.floor(py/TILE)][Math.floor(px/TILE)]; }
+function setTile(tx,ty,val){ map[ty][tx]=val; }
+
+function log(msg){ messages.unshift(msg); if(messages.length>5) messages.pop(); const el=document.getElementById('log'); el.textContent = messages[0] || ''; }
+
+// ---- Input ----
+const keys = {};
+window.addEventListener('keydown', e=>{ keys[e.key.toLowerCase()]=true; if(['arrowup','arrowdown','arrowleft','arrowright'].includes(e.key.toLowerCase())) e.preventDefault(); });
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+// ---- Save / Load ----
+function saveGame(){ try{ const data = {map,player:serializePlayer(),enemies}; localStorage.setItem('valor_save', JSON.stringify(data)); log('Game saved.'); }catch(e){ log('Save failed.'); } }
+function loadGame(){ try{ const d = JSON.parse(localStorage.getItem('valor_save')); if(!d) { log('No save found.'); return;} map = d.map; deserializePlayer(d.player); enemies = d.enemies || []; log('Game loaded.'); updateHUD(); }catch(e){ log('Load failed.'); } }
+function serializePlayer(){ return {x:player.x, y:player.y, hp:player.hp, maxHp:player.maxHp, xp:player.xp, lvl:player.lvl, gold:player.gold, inv:player.inv, facing:player.facing}; }
+function deserializePlayer(p){ player = {x:p.x, y:p.y, vx:0, vy:0, hp:p.hp, maxHp:p.maxHp, xp:p.xp, lvl:p.lvl, gold:p.gold, inv:p.inv||{potion:0}, facing:p.facing||'down'}; updateHUD(); }
+
+// ---- Game Loop ----
+let last=performance.now();
+function loop(t){ const dt = Math.min(0.05, (t-last)/1000); last=t; update(dt); render(); requestAnimationFrame(loop); }
+
+function update(dt){ if(!player) return;
+  // movement input
+  let dx=0, dy=0;
+  if(keys['arrowleft']||keys['a']) { dx=-1; player.facing='left'; }
+  if(keys['arrowright']||keys['d']) { dx+=1; player.facing='right'; }
+  if(keys['arrowup']||keys['w']) { dy=-1; player.facing='up'; }
+  if(keys['arrowdown']||keys['s']) { dy+=1; player.facing='down'; }
+  const len = Math.hypot(dx,dy) || 1;
+  player.vx = dx/len * PLAYER_SPEED;
+  player.vy = dy/len * PLAYER_SPEED;
+
+  // check tile speed modifiers
+  const t = tileAt(player.x, player.y);
+  let speedMod = t===2?0.6:1;
+  player.x += player.vx * dt * speedMod;
+  player.y += player.vy * dt * speedMod;
+
+  // collision with walls: simple tile check
+  const tx = Math.floor(player.x/TILE), ty = Math.floor(player.y/TILE);
+  if(!isWalkable(tx,ty)){
+    // rollback small step
+    player.x -= player.vx * dt * speedMod;
+    player.y -= player.vy * dt * speedMod;
+  }
+
+  // interaction / attack
+  if(keys['x']){ keys['x']=false; interactOrAttack(); }
+
+  // enemies AI
+  enemies.forEach(e=>{
+    e.roam -= dt; if(e.roam<=0){ const ang = Math.random()*Math.PI*2; e.vx = Math.cos(ang)*e.speed; e.vy = Math.sin(ang)*e.speed; e.roam = 1 + Math.random()*2; }
+    // move towards player if close
+    const dxp = player.x - e.x, dyp = player.y - e.y; const dist = Math.hypot(dxp,dyp);
+    if(dist < 220){ e.vx = (dxp/dist) * (e.speed+20); e.vy = (dyp/dist) * (e.speed+20); }
+    e.x += e.vx * dt; e.y += e.vy * dt;
+    // simple collision with walls
+    const etx = Math.floor(e.x/TILE), ety = Math.floor(e.y/TILE);
+    if(!isWalkable(etx,ety)){ e.x -= e.vx * dt; e.y -= e.vy * dt; e.roam = 0; }
+
+    // enemy attacks player
+    if(dist < 28){ // melee hit
+      if(!e._hitCooldown) { player.hp -= e.atk; e._hitCooldown = 0.6; log('Hit by enemy for '+e.atk+'!'); }
+    }
+    if(e._hitCooldown) e._hitCooldown -= dt;
+  });
+
+  // player death
+  if(player.hp <= 0){ log('You fell in battle. Press New Game to try again.'); player.hp = 0; }
+
+  // update HUD
+  updateHUD();
+}
+
+function interactOrAttack(){
+  const dir = player.facing;
+  const tx = Math.floor((player.x + (dir==='right'? TILE: dir==='left'? -TILE:0))/TILE);
+  const ty = Math.floor((player.y + (dir==='down'? TILE: dir==='up'? -TILE:0))/TILE);
+  // chest
+  if(map[ty] && map[ty][tx]===3){ map[ty][tx]=0; const gold = 10 + Math.floor(Math.random()*40); player.gold += gold; log('You opened a chest and found '+gold+' gold!'); if(player.gold>highGold) highGold=player.gold; return; }
+  // attack enemies in front
+  for(let i=0;i<enemies.length;i++){
+    const e = enemies[i]; const dx = e.x - player.x, dy = e.y - player.y; const dist = Math.hypot(dx,dy);
+    const facingOK = (dir==='right' && dx>0)||(dir==='left' && dx<0)||(dir==='up' && dy<0)||(dir==='down' && dy>0);
+    if(dist < 56 && facingOK){ // hit
+      const dmg = 4 + Math.floor(Math.random()*player.lvl);
+      e.hp -= dmg; log('You hit enemy for '+dmg+' dmg');
+      if(e.hp <= 0){ log('Enemy defeated!'); player.xp += 20; player.gold += 5 + Math.floor(Math.random()*10); enemies.splice(i,1); if(player.xp >= xpToLevel(player.lvl)) levelUp(); }
+      return;
+    }
+  }
+  // try using potion if no enemy
+  if(player.inv.potion && player.hp < player.maxHp){ player.inv.potion--; player.hp = Math.min(player.maxHp, player.hp + 12); log('You used a potion.'); return; }
+  log('Nothing there.');
+}
+
+function xpToLevel(l){ return 50 + l*30; }
+function levelUp(){ player.lvl++; player.xp = 0; player.maxHp += 6; player.hp = player.maxHp; player.gold += 20; log('You reached level '+player.lvl+'!'); }
+
+// ---- Rendering ----
+function render(){
+  // clear
+  ctx.fillStyle = '#06101a'; ctx.fillRect(0,0,W,H);
+  // camera center on player
+  const camX = player? player.x - W/2 : 0;
+  const camY = player? player.y - H/2 : 0;
+
+  // draw tiles
+  const startTx = Math.floor(camX / TILE) -1; const endTx = startTx + Math.ceil(W/TILE)+3;
+  const startTy = Math.floor(camY / TILE) -1; const endTy = startTy + Math.ceil(H/TILE)+3;
+  for(let ty=startTy; ty<endTy; ty++){
+    for(let tx=startTx; tx<endTx; tx++){
+      const sx = tx*TILE - camX; const sy = ty*TILE - camY;
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H){ ctx.fillStyle='#0a0a0a'; ctx.fillRect(sx,sy,TILE,TILE); continue; }
+      const v = map[ty][tx];
+      if(v===1){ ctx.fillStyle='#2b2f36'; ctx.fillRect(sx,sy,TILE,TILE); ctx.strokeStyle='#111'; ctx.strokeRect(sx,sy,TILE,TILE); }
+      else if(v===2){ ctx.fillStyle='#173d17'; ctx.fillRect(sx,sy,TILE,TILE); }
+      else if(v===3){ ctx.fillStyle='#442e0f'; ctx.fillRect(sx,sy,TILE,TILE); ctx.fillStyle='#ffc'; ctx.fillRect(sx+TILE/4, sy+TILE/4, TILE/2, TILE/2); }
+      else { ctx.fillStyle='#25444b'; ctx.fillRect(sx,sy,TILE,TILE); }
+    }
+  }
+
+  // draw enemies
+  enemies.forEach(e=>{
+    const ex = e.x - camX; const ey = e.y - camY;
+    ctx.fillStyle = '#b55'; ctx.beginPath(); ctx.arc(ex,ey,12,0,Math.PI*2); ctx.fill();
+    // hp bar
+    ctx.fillStyle = '#111'; ctx.fillRect(ex-16,ey-22,32,6); ctx.fillStyle = '#f55'; ctx.fillRect(ex-16,ey-22,32 * (e.hp / (8+6)),6);
+  });
+
+  // draw player
+  if(player){
+    const px = player.x - camX; const py = player.y - camY;
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.beginPath(); ctx.ellipse(px,py+18,16,6,0,0,Math.PI*2); ctx.fill();
+    // body
+    ctx.fillStyle = '#9fbcff'; ctx.beginPath(); ctx.arc(px,py,14,0,Math.PI*2); ctx.fill();
+    // face direction marker
+    ctx.fillStyle = '#063'; if(player.facing==='up') ctx.fillRect(px-4,py-18,8,8);
+    else if(player.facing==='down') ctx.fillRect(px-4,py+10,8,8);
+    else if(player.facing==='left') ctx.fillRect(px-18,py-4,8,8);
+    else ctx.fillRect(px+10,py-4,8,8);
+  }
+
+  // overlay mini HUD
+  ctx.fillStyle = 'rgba(0,0,0,0.34)'; ctx.fillRect(8,8,260,72);
+  ctx.fillStyle = 'white'; ctx.font='14px system-ui'; ctx.textAlign='left'; ctx.fillText('Valorbound — Mini RPG', 16, 28);
+  ctx.fillStyle = '#9fd'; ctx.fillText('HP: '+player.hp+'/'+player.maxHp, 16, 48);
+  ctx.fillText('Lvl: '+player.lvl+'  XP: '+player.xp+'/'+xpToLevel(player.lvl), 16, 66);
+}
+
+// ---- UI Hooks ----
+function updateHUD(){ document.getElementById('hp').textContent = player ? player.hp+'/'+player.maxHp : '—'; document.getElementById('xp').textContent = player? player.xp : 0; document.getElementById('gold').textContent = player? player.gold : 0; document.getElementById('lvl').textContent = player? player.lvl : 0; document.getElementById('hi').textContent = highGold; }
+
+document.getElementById('saveBtn').addEventListener('click', saveGame);
+document.getElementById('loadBtn').addEventListener('click', loadGame);
+document.getElementById('newBtn').addEventListener('click', ()=>{ newGame(); last=performance.now(); });
+document.getElementById('helpBtn').addEventListener('click', ()=>{ alert('Controls:\nMove: Arrow keys or WASD\nX: Interact / Attack\nNew Game / Save / Load buttons available.\nExtend the game by adding quests, NPCs, and maps!'); });
+
+// ---- start ----
+newGame(); requestAnimationFrame(loop);
+
+// responsive
+function fixHiDPI(){ const dpr = window.devicePixelRatio || 1; const rect = CANVAS.getBoundingClientRect(); CANVAS.width = Math.round(rect.width * dpr); CANVAS.height = Math.round(rect.height * dpr); ctx.setTransform(dpr,0,0,dpr,0,0); W=CANVAS.width/dpr; H=CANVAS.height/dpr; }
+new ResizeObserver(fixHiDPI).observe(CANVAS); fixHiDPI();
+
+</script>
+</body>
+</html>
